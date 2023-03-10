@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Digiflazz\Balance;
 use App\Models\Digiflazz\TopUp;
+use App\Models\Digiflazz\WebhookLog;
 use App\Models\Product;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -106,6 +107,10 @@ class DigiflazzController extends Controller
         if ($validator->fails()) {
             return $this->sendError('Validation Error.', $validator->errors(), 'VALIDATION_ERROR', 422);
         }
+        
+        if (Auth::user()->role_id != 2) {
+            return $this->sendError('You cannot allow to acccess this api', [], 'PROCESS_ERROR', '400');
+        }
 
         $url = 'https://api.digiflazz.com/v1/transaction';
         $username = env('DIGIFLAZZ_USERNAME');
@@ -133,23 +138,28 @@ class DigiflazzController extends Controller
         ]);
 
         $data = $response->json()['data'];
-
-        TopUp::create([
-            'user_id' => Auth::user()->id,
-            'ref_id' => $ref_id,
-            'customer_no' => $request->number,
-            'buyer_sku_code' => $request->sku_code,
-            'message' => $request->message,
-            'status' => $data['status'],
-            'rc' => $data['rc'],
-            'buyer_last_saldo' => $data['buyer_last_saldo'],
-            'sn' => $data['sn'],
-            'price' => $data['price'],
-            'tele' => $data['tele'],
-            'wa' => $data['wa'],
-        ]);
-
-        return $this->sendResponse($data, 'Success topup');
+        
+        file_put_contents(storage_path('logs/topup.json'), json_encode($response->json()), FILE_APPEND);
+        try {
+            TopUp::create([
+                'user_id' => Auth::user()->id,
+                'ref_id' => $ref_id,
+                'customer_no' => $request->number,
+                'buyer_sku_code' => $request->sku_code,
+                'message' => $request->message,
+                'status' => $data['status'],
+                'rc' => $data['rc'],
+                'buyer_last_saldo' => $data['buyer_last_saldo'],
+                'sn' => $data['sn'],
+                'price' => $data['price'],
+                'tele' => $data['tele'],
+                'wa' => $data['wa'],
+            ]);
+            
+            return $this->sendResponse($data, 'Success topup');
+        } catch (\Throwable $th) {
+            return $this->sendError($th->getMessage(), $th->getTrace(), 'SERVER_ERROR', 500);
+        }
     }
 
     public function cek_tagihan(Request $request)
@@ -277,6 +287,10 @@ class DigiflazzController extends Controller
         $post_data = file_get_contents('php://input');
         $signature = hash_hmac('sha1', $post_data, $secret);
         file_put_contents(storage_path('logs/digiflazz.json'), $post_data, FILE_APPEND);
+        
+        WebhookLog::create([
+            'data' => json_decode($post_data, true)['data'],
+        ]);
 
         if ($request->header('X-Hub-Signature') == 'sha1='.$signature) {
             $response = json_decode($post_data, true)['data'];
@@ -289,6 +303,23 @@ class DigiflazzController extends Controller
             $sn = $response['sn'];
             $trx_id = $response['trx_id'];
             $buyer_last_saldo = $response['buyer_last_saldo'];
+            
+            Topup::updateOrCreate([
+                'ref_id' => $ref_id,    
+            ], [
+                'status' => $status,
+                'message' => $message,
+                'buyer_sku_code' => $buyer_sku_code,
+                'customer_no' => $customer_no,
+                'price' => $price,
+                'sn' => $sn,
+                'buyer_last_saldo' => $buyer_last_saldo,
+            ]);
+            
+            Balance::updateOrCreate(
+                ['id' => 1],
+                ['balance' => $buyer_last_saldo]
+            );
         }
     }
 }
